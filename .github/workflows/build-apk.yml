@@ -1,9 +1,12 @@
-name: Build ReelGuard APK
+name: Build & Release ReelGuard APK
 
 on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -24,10 +27,28 @@ jobs:
           gradle-version: '8.7'
 
       - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
+        run: |
+          if [ -f "settings.gradle.kts" ]; then
+            gradle assembleDebug --no-daemon
+            cp app/build/outputs/apk/debug/app-debug.apk ReelGuard.apk
+          elif [ -f "ReelGuard_Android_Project/settings.gradle.kts" ]; then
+            cd ReelGuard_Android_Project && gradle assembleDebug --no-daemon
+            cp app/build/outputs/apk/debug/app-debug.apk ../ReelGuard.apk
+          fi
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ReelGuard-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ReelGuard.apk
+
+      - name: Publish APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: ReelGuard v1.0.${{ github.run_number }} (Android APK)
+          body: |
+            ### ReelGuard Android APK Release
+            Download **`ReelGuard.apk`** below under **Assets** and tap it on your Android phone to install.
+          files: ReelGuard.apk
+          prerelease: false
