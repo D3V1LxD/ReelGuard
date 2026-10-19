@@ -1,9 +1,4 @@
-# ReelGuard — GitHub Repository & Release Descriptions
-
-## 1. Short Repository "About" Description (One-Line)
-Real-time Android Reel & Shorts counter with a top-of-screen floating overlay, green-to-red threshold alert, animated Brain Health indicator, and Day/Week/Month analytics across Instagram, TikTok, YouTube, Facebook, and all short-video apps.
-
-## 2. Short GitHub Release Description (`v1.0.0`)
+Short GitHub Release Description (`v1.0.8`)
 **ReelGuard** is a lightweight Android app that automatically counts the Reels and Shorts you watch across Instagram, Facebook, YouTube Shorts, TikTok, and any other short-video platform.
 
 ### Key Features
