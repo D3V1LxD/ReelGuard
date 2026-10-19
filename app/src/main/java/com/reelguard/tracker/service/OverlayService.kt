@@ -14,11 +14,14 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -30,30 +33,80 @@ import com.reelguard.tracker.ui.DynamicLauncherIconManager
 import com.reelguard.tracker.ui.MainActivity
 
 /**
- * Foreground Service that displays the live Reel/Shorts counter pill at the
- * very top of the phone display, complete with the real-time active app icon,
- * Green -> Amber -> Red color interpolation, and the animated BrainHealthView.
+ * Foreground Service that manages the top-of-screen Reel counter pill.
+ * The floating overlay is HIDDEN by default and ONLY becomes visible when
+ * ReelAccessibilityService detects that the user is actively watching Reels/Shorts.
  */
 class OverlayService : Service() {
 
     companion object {
         const val ACTION_UPDATE_COUNTER = "com.reelguard.tracker.ACTION_UPDATE_COUNTER"
+        const val ACTION_SET_OVERLAY_VISIBILITY = "com.reelguard.tracker.ACTION_SET_OVERLAY_VISIBILITY"
+        const val EXTRA_IS_WATCHING_REELS = "extra_is_watching_reels"
+        const val EXTRA_ACTIVE_APP = "extra_active_app"
+        const val EXTRA_ACTIVE_PKG = "extra_active_pkg"
+        const val EXTRA_PREVIEW_DURATION_MS = "extra_preview_duration_ms"
+
         private const val CHANNEL_ID = "reelguard_overlay_channel"
         private const val NOTIFICATION_ID = 1001
     }
 
     private lateinit var windowManager: WindowManager
     private lateinit var dbHelper: ReelDatabaseHelper
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var overlayContainer: LinearLayout? = null
     private var activeAppIconView: AppIconView? = null
     private var brainView: BrainHealthView? = null
     private var countTextView: TextView? = null
     private var statusLabelView: TextView? = null
     private var pillBackground: GradientDrawable? = null
+    private var isCurrentlyWatchingReels: Boolean = false
 
-    private val updateReceiver = object : BroadcastReceiver() {
+    private val hidePreviewRunnable = Runnable {
+        if (!isCurrentlyWatchingReels) {
+            overlayContainer?.visibility = View.GONE
+        }
+    }
+
+    private val overlayReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            refreshOverlayData()
+            when (intent?.action) {
+                ACTION_UPDATE_COUNTER -> {
+                    val activePkg = intent.getStringExtra(EXTRA_ACTIVE_PKG)
+                    val activeApp = intent.getStringExtra(EXTRA_ACTIVE_APP)
+                    if (!activePkg.isNullOrEmpty()) {
+                        activeAppIconView?.packageHint = activePkg
+                    }
+                    if (!activeApp.isNullOrEmpty()) {
+                        activeAppIconView?.appCategory = activeApp
+                    }
+                    isCurrentlyWatchingReels = true
+                    setOverlayVisible(true)
+                    refreshOverlayData()
+                }
+                ACTION_SET_OVERLAY_VISIBILITY -> {
+                    val visible = intent.getBooleanExtra(EXTRA_IS_WATCHING_REELS, false)
+                    val activeApp = intent.getStringExtra(EXTRA_ACTIVE_APP)
+                    val previewMs = intent.getLongExtra(EXTRA_PREVIEW_DURATION_MS, 0L)
+
+                    if (!activeApp.isNullOrEmpty()) {
+                        activeAppIconView?.appCategory = activeApp
+                    }
+
+                    if (previewMs > 0L) {
+                        refreshOverlayData()
+                        setOverlayVisible(true)
+                        mainHandler.removeCallbacks(hidePreviewRunnable)
+                        mainHandler.postDelayed(hidePreviewRunnable, previewMs)
+                    } else {
+                        isCurrentlyWatchingReels = visible
+                        if (visible) {
+                            refreshOverlayData()
+                        }
+                        setOverlayVisible(visible)
+                    }
+                }
+            }
         }
     }
 
@@ -64,33 +117,50 @@ class OverlayService : Service() {
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
 
-        val filter = IntentFilter(ACTION_UPDATE_COUNTER)
+        val filter = IntentFilter().apply {
+            addAction(ACTION_UPDATE_COUNTER)
+            addAction(ACTION_SET_OVERLAY_VISIBILITY)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(updateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(overlayReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
-            registerReceiver(updateReceiver, filter)
+            registerReceiver(overlayReceiver, filter)
         }
 
         if (Settings.canDrawOverlays(this)) {
-            showTopOverlay()
+            createTopOverlayView()
             refreshOverlayData()
+            // Keep hidden until the user actually opens a Reel / Shorts feed
+            setOverlayVisible(false)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (overlayContainer == null && Settings.canDrawOverlays(this)) {
-            showTopOverlay()
+            createTopOverlayView()
+            setOverlayVisible(isCurrentlyWatchingReels)
         }
         refreshOverlayData()
         return START_STICKY
     }
 
-    private fun showTopOverlay() {
+    private fun setOverlayVisible(visible: Boolean) {
+        mainHandler.post {
+            if (overlayContainer == null && Settings.canDrawOverlays(this)) {
+                createTopOverlayView()
+            }
+            overlayContainer?.visibility = if (visible) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun createTopOverlayView() {
+        if (overlayContainer != null) return
         val density = resources.displayMetrics.density
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE // Hidden by default; only shown when watching Reels/Shorts
             setPadding(
                 (10 * density).toInt(),
                 (6 * density).toInt(),
@@ -108,7 +178,6 @@ class OverlayService : Service() {
         container.background = bg
         pillBackground = bg
 
-        // Real-time Active App Icon (Instagram, TikTok, YouTube, Facebook, or Other)
         val appIcon = AppIconView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 (22 * density).toInt(),
@@ -211,14 +280,15 @@ class OverlayService : Service() {
             ReelDatabaseHelper.DEFAULT_DAILY_LIMIT
         ).coerceAtLeast(1)
         val lastApp = prefs.getString(ReelDatabaseHelper.KEY_LAST_ACTIVE_APP, "Instagram") ?: "Instagram"
+        val lastPkg = prefs.getString(ReelDatabaseHelper.KEY_LAST_ACTIVE_PKG, "") ?: ""
 
+        activeAppIconView?.packageHint = lastPkg
         activeAppIconView?.appCategory = lastApp
 
         val ratio = todayCount.toFloat() / dailyLimit.toFloat()
         brainView?.damageRatio = ratio
         val statusColor = brainView?.getInterpolatedStatusColor() ?: Color.parseColor("#10B981")
 
-        // Also update the Home Screen App Launcher Icon in real time
         DynamicLauncherIconManager.updateLauncherIconForRatio(this, ratio)
 
         countTextView?.text = "$todayCount Reels"
@@ -245,7 +315,7 @@ class OverlayService : Service() {
                 "ReelGuard Top Display Counter",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps the top-of-screen reel counter active"
+                description = "Shows the top-of-screen reel counter only while watching Reels or Shorts"
             }
             val nm = getSystemService(NotificationManager::class.java)
             nm.createNotificationChannel(channel)
@@ -260,8 +330,8 @@ class OverlayService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("ReelGuard Active")
-            .setContentText("Counting Reels & Shorts at the top of your display")
+            .setContentTitle("ReelGuard Monitoring Reels & Shorts")
+            .setContentText("Overlay appears automatically when you open Reels or Shorts")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -270,8 +340,9 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacksAndMessages(null)
         try {
-            unregisterReceiver(updateReceiver)
+            unregisterReceiver(overlayReceiver)
         } catch (_: Exception) {}
         overlayContainer?.let {
             windowManager.removeView(it)

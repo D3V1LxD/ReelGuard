@@ -7,9 +7,8 @@ import android.util.AttributeSet
 import android.view.View
 
 /**
- * Renders the real-time native app icon from Android's PackageManager if installed,
- * or draws crisp vector brand geometry for Instagram, TikTok, YouTube Shorts,
- * Facebook, and Other Apps (zero emojis used).
+ * Loads the real installed app icon for ANY app via PackageManager,
+ * falling back to vector brand geometry for Instagram, TikTok, YouTube, Facebook, or generic video apps.
  */
 class AppIconView @JvmOverloads constructor(
     context: Context,
@@ -20,7 +19,14 @@ class AppIconView @JvmOverloads constructor(
     var appCategory: String = "Instagram"
         set(value) {
             field = value
-            nativeIcon = resolveNativeAppIcon(value)
+            nativeIcon = resolveNativeAppIcon(value, packageHint)
+            invalidate()
+        }
+
+    var packageHint: String = ""
+        set(value) {
+            field = value
+            nativeIcon = resolveNativeAppIcon(appCategory, value)
             invalidate()
         }
 
@@ -34,18 +40,25 @@ class AppIconView @JvmOverloads constructor(
     }
 
     init {
-        nativeIcon = resolveNativeAppIcon(appCategory)
+        nativeIcon = resolveNativeAppIcon(appCategory, packageHint)
     }
 
-    private fun resolveNativeAppIcon(categoryOrPkg: String): Drawable? {
+    private fun resolveNativeAppIcon(categoryOrPkg: String, pkgHint: String): Drawable? {
+        val pm = context.packageManager
+        if (pkgHint.isNotEmpty()) {
+            try {
+                return pm.getApplicationIcon(pkgHint)
+            } catch (_: Exception) {}
+        }
         val candidatePackages = when (categoryOrPkg) {
             "Instagram" -> listOf("com.instagram.android", "com.instagram.lite")
-            "TikTok" -> listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
-            "YouTube" -> listOf("com.google.android.youtube")
+            "TikTok" -> listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill", "com.zhiliaoapp.musically.go")
+            "YouTube" -> listOf("com.google.android.youtube", "app.revanced.android.youtube")
             "Facebook" -> listOf("com.facebook.katana", "com.facebook.lite")
+            "Snapchat" -> listOf("com.snapchat.android")
+            "X (Twitter)" -> listOf("com.twitter.android")
             else -> listOf(categoryOrPkg)
         }
-        val pm = context.packageManager
         for (pkg in candidatePackages) {
             try {
                 return pm.getApplicationIcon(pkg)

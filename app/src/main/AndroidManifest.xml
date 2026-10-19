@@ -1,23 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     package="com.reelguard.tracker">
 
     <!-- Required to show the floating reel counter at the top of the phone display -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <!-- Required to keep the top display overlay alive -->
+    <!-- Required to keep the top display overlay service running -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Required to fetch real-time native app icons for social video apps -->
-    <queries>
-        <package android:name="com.instagram.android" />
-        <package android:name="com.zhiliaoapp.musically" />
-        <package android:name="com.ss.android.ugc.trill" />
-        <package android:name="com.google.android.youtube" />
-        <package android:name="com.facebook.katana" />
-        <package android:name="com.snapchat.android" />
-        <package android:name="com.twitter.android" />
-    </queries>
+    <!-- Allows resolving real app names and icons for ANY platform where the user watches Reels/Shorts -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
 
     <application
         android:allowBackup="true"
@@ -74,7 +69,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Displays real-time short-form video counter, active app icon, and brain health indicator at top of screen" />
+                android:value="Displays real-time short-form video counter, active app icon, and brain health indicator at top of screen while watching reels" />
         </service>
 
         <!-- Accessibility Service that detects Reels & Shorts across all apps -->

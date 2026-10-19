@@ -10,7 +10,8 @@ import java.util.Date
 import java.util.Locale
 
 data class AppUsageStat(
-    val appCategory: String,
+    val appName: String,
+    val packageName: String,
     val count: Int,
     val percentage: Float
 )
@@ -20,12 +21,12 @@ data class DailyBucket(
     val count: Int
 )
 
-class ReelDatabaseHelper(context: Context) :
-    SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
+class ReelDatabaseHelper(private val appContext: Context) :
+    SQLiteOpenHelper(appContext, DATABASE_NAME, null, DATABASE_VERSION) {
 
     companion object {
         private const val DATABASE_NAME = "reelguard.db"
-        private const val DATABASE_VERSION = 1
+        private const val DATABASE_VERSION = 2
         const val TABLE_REELS = "reel_views"
         const val COL_ID = "id"
         const val COL_TIMESTAMP = "timestamp"
@@ -36,16 +37,25 @@ class ReelDatabaseHelper(context: Context) :
         const val PREFS_NAME = "reelguard_prefs"
         const val KEY_DAILY_LIMIT = "daily_limit"
         const val KEY_LAST_ACTIVE_APP = "last_active_app"
+        const val KEY_LAST_ACTIVE_PKG = "last_active_pkg"
         const val DEFAULT_DAILY_LIMIT = 50
 
-        fun categorizePackage(pkg: String): String {
+        fun resolvePlatformName(context: Context, pkg: String): String {
             val lower = pkg.lowercase(Locale.ROOT)
-            return when {
-                lower.contains("instagram") -> "Instagram"
-                lower.contains("facebook") || lower.contains("katana") || lower.contains("lite") -> "Facebook"
-                lower.contains("youtube") -> "YouTube"
-                lower.contains("musically") || lower.contains("trill") || lower.contains("tiktok") -> "TikTok"
-                else -> "Other Apps"
+            when {
+                lower.contains("instagram") -> return "Instagram"
+                lower.contains("facebook.katana") || lower.contains("facebook.lite") || lower.contains("facebook") -> return "Facebook"
+                lower.contains("youtube") -> return "YouTube"
+                lower.contains("musically") || lower.contains("trill") || lower.contains("tiktok") -> return "TikTok"
+                lower.contains("snapchat") -> return "Snapchat"
+                lower.contains("twitter") || lower.contains("com.x.") -> return "X (Twitter)"
+            }
+            return try {
+                val pm = context.packageManager
+                val info = pm.getApplicationInfo(pkg, 0)
+                pm.getApplicationLabel(info).toString()
+            } catch (_: Exception) {
+                pkg.substringAfterLast('.').replaceFirstChar { it.uppercase() }
             }
         }
     }
@@ -74,19 +84,20 @@ class ReelDatabaseHelper(context: Context) :
     fun recordReelView(context: Context, packageName: String): Int {
         val now = System.currentTimeMillis()
         val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(now))
-        val category = categorizePackage(packageName)
+        val platformName = resolvePlatformName(context, packageName)
 
         val values = ContentValues().apply {
             put(COL_TIMESTAMP, now)
             put(COL_DATE_STR, dateStr)
             put(COL_PACKAGE, packageName)
-            put(COL_CATEGORY, category)
+            put(COL_CATEGORY, platformName)
         }
         writableDatabase.insert(TABLE_REELS, null, values)
 
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_LAST_ACTIVE_APP, category)
+            .putString(KEY_LAST_ACTIVE_APP, platformName)
+            .putString(KEY_LAST_ACTIVE_PKG, packageName)
             .apply()
 
         return getTodayCount()
@@ -134,30 +145,34 @@ class ReelDatabaseHelper(context: Context) :
         cal.set(Calendar.SECOND, 0)
         cal.set(Calendar.MILLISECOND, 0)
 
-        val categories = linkedMapOf(
-            "Instagram" to 0,
-            "TikTok" to 0,
-            "YouTube" to 0,
-            "Facebook" to 0,
-            "Other Apps" to 0
+        val defaultPlatforms = linkedMapOf(
+            "Instagram" to Pair("com.instagram.android", 0),
+            "Facebook" to Pair("com.facebook.katana", 0),
+            "YouTube" to Pair("com.google.android.youtube", 0),
+            "TikTok" to Pair("com.zhiliaoapp.musically", 0)
         )
 
         val cursor = readableDatabase.rawQuery(
-            "SELECT $COL_CATEGORY, COUNT(*) FROM $TABLE_REELS WHERE $COL_TIMESTAMP >= ? GROUP BY $COL_CATEGORY",
+            "SELECT $COL_CATEGORY, $COL_PACKAGE, COUNT(*) FROM $TABLE_REELS WHERE $COL_TIMESTAMP >= ? GROUP BY $COL_CATEGORY",
             arrayOf(cal.timeInMillis.toString())
         )
         var total = 0
         while (cursor.moveToNext()) {
-            val cat = cursor.getString(0) ?: "Other Apps"
-            val c = cursor.getInt(1)
-            categories[cat] = (categories[cat] ?: 0) + c
+            val appName = cursor.getString(0) ?: "Other"
+            val pkgName = cursor.getString(1) ?: ""
+            val c = cursor.getInt(2)
+            val existing = defaultPlatforms[appName]
+            defaultPlatforms[appName] = Pair(
+                if (pkgName.isNotEmpty()) pkgName else (existing?.first ?: ""),
+                (existing?.second ?: 0) + c
+            )
             total += c
         }
         cursor.close()
 
         val denom = if (total > 0) total.toFloat() else 1f
-        return categories.map { (cat, count) ->
-            AppUsageStat(cat, count, (count / denom) * 100f)
+        return defaultPlatforms.map { (appName, pair) ->
+            AppUsageStat(appName, pair.first, pair.second, (pair.second / denom) * 100f)
         }.sortedByDescending { it.count }
     }
 

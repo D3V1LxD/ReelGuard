@@ -1,5 +1,6 @@
 package com.reelguard.tracker.ui
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -9,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.ViewGroup
@@ -16,6 +18,7 @@ import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import com.reelguard.tracker.data.ReelDatabaseHelper
 import com.reelguard.tracker.service.OverlayService
+import com.reelguard.tracker.service.ReelAccessibilityService
 
 class MainActivity : AppCompatActivity() {
 
@@ -23,6 +26,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var brainHeroView: BrainHealthView
     private lateinit var heroCountTv: TextView
     private lateinit var heroStatusTv: TextView
+    private lateinit var overlayBtn: Button
+    private lateinit var accBtn: Button
     private lateinit var daySummaryTv: TextView
     private lateinit var weekSummaryTv: TextView
     private lateinit var monthSummaryTv: TextView
@@ -41,6 +46,11 @@ class MainActivity : AppCompatActivity() {
         refreshDashboard()
         if (Settings.canDrawOverlays(this)) {
             startTopOverlayService()
+            // Keep overlay hidden while user is viewing the ReelGuard Dashboard
+            sendBroadcast(Intent(OverlayService.ACTION_SET_OVERLAY_VISIBILITY).apply {
+                setPackage(packageName)
+                putExtra(OverlayService.EXTRA_IS_WATCHING_REELS, false)
+            })
         }
     }
 
@@ -51,6 +61,24 @@ class MainActivity : AppCompatActivity() {
         } else {
             startService(serviceIntent)
         }
+    }
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val expectedComponent = ComponentName(this, ReelAccessibilityService::class.java)
+        val enabledServices = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        val splitter = TextUtils.SimpleStringSplitter(':')
+        splitter.setString(enabledServices)
+        while (splitter.hasNext()) {
+            val componentStr = splitter.next()
+            val enabledComponent = ComponentName.unflattenFromString(componentStr)
+            if (enabledComponent != null && enabledComponent == expectedComponent) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -72,7 +100,7 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
         }
         val subtitleTv = TextView(this).apply {
-            text = "Real-Time App Icons, Top Display Counter & Brain Health"
+            text = "Live Reel & Shorts Tracker Across All Platforms"
             setTextColor(Color.parseColor("#9CA3AF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setPadding(0, dp(4), 0, dp(16))
@@ -84,10 +112,11 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 0, 0, dp(16))
         }
-        val overlayBtn = Button(this).apply {
-            text = "1. Enable Top Overlay"
+        overlayBtn = Button(this).apply {
+            text = "1. Top Overlay"
             setBackgroundColor(Color.parseColor("#1F2937"))
             setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginEnd = dp(6)
             }
@@ -100,14 +129,19 @@ class MainActivity : AppCompatActivity() {
                     startActivity(intent)
                 } else {
                     startTopOverlayService()
-                    Toast.makeText(this@MainActivity, "Top Overlay Active!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Overlay ready! It will appear automatically when you watch Reels or Shorts.",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
             }
         }
-        val accBtn = Button(this).apply {
-            text = "2. Enable Reel Detector"
+        accBtn = Button(this).apply {
+            text = "2. Reel Detector"
             setBackgroundColor(Color.parseColor("#1F2937"))
             setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = dp(6)
             }
@@ -143,48 +177,28 @@ class MainActivity : AppCompatActivity() {
             text = "Brain Status: Healthy & Sharp"
             setTextColor(Color.parseColor("#D1D5DB"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER
         }
-        val testAddBtn = Button(this).apply {
-            text = "+ Simulate Watching 5 Reels"
-            setBackgroundColor(Color.parseColor("#2563EB"))
-            setTextColor(Color.WHITE)
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = dp(12)
-            }
-            setOnClickListener {
-                val samplePackages = listOf(
-                    "com.instagram.android",
-                    "com.zhiliaoapp.musically",
-                    "com.google.android.youtube",
-                    "com.facebook.katana",
-                    "com.snapchat.android"
-                )
-                for (pkg in samplePackages) {
-                    dbHelper.recordReelView(this@MainActivity, pkg)
-                }
-                sendBroadcast(Intent(OverlayService.ACTION_UPDATE_COUNTER).apply {
-                    setPackage(packageName)
-                })
-                refreshDashboard()
-            }
+        val infoSubTv = TextView(this).apply {
+            text = "Open Instagram, Facebook, YouTube Shorts, TikTok, or any short-video app — your reels are counted automatically as you swipe."
+            setTextColor(Color.parseColor("#9CA3AF"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(10), dp(8), 0)
         }
         heroCard.addView(brainHeroView)
         heroCard.addView(heroCountTv)
         heroCard.addView(heroStatusTv)
-        heroCard.addView(testAddBtn)
+        heroCard.addView(infoSubTv)
         root.addView(heroCard)
 
         val summaryRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(16), 0, dp(16))
         }
-        daySummaryTv = createMetricCard(summaryRow, "TODAY", 1)
-        weekSummaryTv = createMetricCard(summaryRow, "THIS WEEK", 7)
-        monthSummaryTv = createMetricCard(summaryRow, "THIS MONTH", 30)
+        daySummaryTv = createMetricCard(summaryRow, "IN A DAY", 1)
+        weekSummaryTv = createMetricCard(summaryRow, "IN A WEEK", 7)
+        monthSummaryTv = createMetricCard(summaryRow, "IN A MONTH", 30)
         root.addView(summaryRow)
 
         val prefs = getSharedPreferences(ReelDatabaseHelper.PREFS_NAME, Context.MODE_PRIVATE)
@@ -208,9 +222,6 @@ class MainActivity : AppCompatActivity() {
                     limitLabel.text = "Daily Red-Alert Threshold: $safeLimit Reels"
                     prefs.edit().putInt(ReelDatabaseHelper.KEY_DAILY_LIMIT, safeLimit).apply()
                     refreshDashboard()
-                    sendBroadcast(Intent(OverlayService.ACTION_UPDATE_COUNTER).apply {
-                        setPackage(packageName)
-                    })
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -220,7 +231,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(limitSeek)
 
         val breakdownTitle = TextView(this).apply {
-            text = "Breakdown by App (Real-Time Native Icons)"
+            text = "Actual Reels Watched by Platform"
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             typeface = Typeface.DEFAULT_BOLD
@@ -285,6 +296,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshDashboard() {
+        val overlayGranted = Settings.canDrawOverlays(this)
+        val accessibilityGranted = isAccessibilityServiceEnabled()
+
+        overlayBtn.text = if (overlayGranted) "Overlay: Active ✓" else "1. Enable Overlay"
+        overlayBtn.setBackgroundColor(
+            Color.parseColor(if (overlayGranted) "#065F46" else "#991B1B")
+        )
+
+        accBtn.text = if (accessibilityGranted) "Detector: Active ✓" else "2. Enable Detector"
+        accBtn.setBackgroundColor(
+            Color.parseColor(if (accessibilityGranted) "#065F46" else "#991B1B")
+        )
+
         val todayCount = dbHelper.getTodayCount()
         val weekCount = dbHelper.getCountSinceDays(7)
         val monthCount = dbHelper.getCountSinceDays(30)
@@ -303,18 +327,17 @@ class MainActivity : AppCompatActivity() {
         brainHeroView.damageRatio = ratio
         val statusColor = brainHeroView.getInterpolatedStatusColor()
 
-        // Update Home Screen Launcher Icon in real time
         DynamicLauncherIconManager.updateLauncherIconForRatio(this, ratio)
 
         heroCountTv.text = "$todayCount Reels Today"
         heroCountTv.setTextColor(statusColor)
 
         val statusDesc = when {
-            ratio < 0.25f -> "Brain Status: Healthy & Sharp (Green Icon Active)"
+            ratio < 0.25f -> "Brain Status: Healthy & Sharp (Green Zone)"
             ratio < 0.50f -> "Brain Status: Mild Attention Drift"
-            ratio < 0.75f -> "Brain Status: Dopamine Overload (Amber Icon Active)"
+            ratio < 0.75f -> "Brain Status: Dopamine Overload (Amber Zone)"
             ratio < 1.00f -> "Brain Status: High Brain Fog Warning!"
-            else -> "Brain Status: CRITICAL BRAIN ROT (Red Icon Active!)"
+            else -> "Brain Status: CRITICAL BRAIN ROT (Limit Exceeded!)"
         }
         heroStatusTv.text = statusDesc
         heroStatusTv.setTextColor(statusColor)
@@ -338,13 +361,14 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             val iconView = AppIconView(this).apply {
-                appCategory = stat.appCategory
+                packageHint = stat.packageName
+                appCategory = stat.appName
                 layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply {
                     marginEnd = dp(10)
                 }
             }
             val nameTv = TextView(this).apply {
-                text = stat.appCategory
+                text = stat.appName
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                 typeface = Typeface.DEFAULT_BOLD
