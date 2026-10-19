@@ -16,16 +16,22 @@ import kotlin.math.abs
 /**
  * Precision Reel & Short-Form Video Detector for Android.
  *
- * Specifically engineered to prevent false counts:
- * 1. NEVER counts on `TYPE_WINDOW_CONTENT_CHANGED` or `TYPE_VIEW_CLICKED` alone
- *    (so subtitles, video timers, progress bars, or tapping to pause/play never trigger counts).
- * 2. Ignores `TYPE_VIEW_SCROLLED` from SeekBars, ProgressBars, audio marquees, and small views
- *    by requiring the scrolling container to cover >= 55% of the screen height.
- * 3. Verifies a genuine Reel page transition before counting +1:
- *    - If the pager reports item indices (`fromIndex >= 0`), requires the page index to actually change.
- *    - If the pager reports `fromIndex == -1`, requires either a vertical swipe distance >= 22% of screen
- *      height OR a verified change in the static Creator/Caption identity (filtering out timers,
- *      numbers, and pause/play/mute state text) after the swipe settles.
+ * Specifically engineered so LONG VIDEOS, PAUSED VIDEOS, and SUBTITLES never cause false counts:
+ * 1. Unified Post-Swipe Settle Verification:
+ *    - A Reel count NEVER increments blindly on a raw scroll event (because long videos contain
+ *      auto-scrolling subtitles, lyrics, comment tickers, and custom progress scrubbers that
+ *      periodically emit `TYPE_VIEW_SCROLLED`).
+ *    - Instead, every candidate vertical pager scroll schedules a single post-settle check (380ms
+ *      after scrolling stops) that inspects the static **Reel Identity Fingerprint**.
+ * 2. Static Reel Identity Fingerprint (Immune to Subtitles & Timers):
+ *    - Built strictly from static per-video anchors that NEVER change while a single long video plays:
+ *      (a) The Right-Rail Action Button Counts (Like count, Comment count, Share/Save count located
+ *          in the right column `bounds.left >= 70%` of screen width), and
+ *      (b) The static Creator Handle (`@username` or clickable short channel title),
+ *      completely ignoring multi-word closed captions/subtitles and video progress timers.
+ * 3. Seen-Reel Fingerprint Memory:
+ *    - Remembers the current and recently seen Reel fingerprints so the same long video cannot
+ *      be counted more than once no matter how long it plays or how many times it is paused.
  */
 class ReelAccessibilityService : AccessibilityService() {
 
@@ -35,17 +41,12 @@ class ReelAccessibilityService : AccessibilityService() {
     private var isInReelMode: Boolean = false
     private var currentReelPackage: String = ""
 
-    // State for accurate single-count per new Reel page
     private var lastCountedTimeMs: Long = 0L
     private var lastClickTimeMs: Long = 0L
-    private var lastFullPagerScrollTimeMs: Long = 0L
-    private var accumulatedVerticalDelta: Int = 0
-    private var lastConfirmedPageIndex: Int = -999
-    private var lastConfirmedSignature: String = ""
-    private var pendingScrollVerifyScheduled: Boolean = false
+    private var currentReelFingerprint: String = ""
+    private val recentFingerprints = ArrayDeque<String>()
 
-    private val verifyScrollTransitionRunnable = Runnable {
-        pendingScrollVerifyScheduled = false
+    private val verifyReelChangeRunnable = Runnable {
         if (!isInReelMode || currentReelPackage.isEmpty()) return@Runnable
 
         val now = System.currentTimeMillis()
@@ -53,33 +54,56 @@ class ReelAccessibilityService : AccessibilityService() {
 
         val root = rootInActiveWindow ?: findActiveAppRoot(currentReelPackage)
         val snapshot = analyzeWindowForReels(currentReelPackage, root)
+
         if (!snapshot.isReelScreen) {
-            if (snapshot.isDefinitelyNonReelScreen) exitReelMode()
+            if (snapshot.isDefinitelyNonReelScreen) {
+                exitReelMode()
+            }
             return@Runnable
         }
 
-        // Verify that the static creator/caption identity actually changed to a DIFFERENT reel
-        if (snapshot.stableSignature.isNotEmpty() &&
-            snapshot.stableSignature != lastConfirmedSignature
-        ) {
-            lastConfirmedSignature = snapshot.stableSignature
+        val newFp = snapshot.reelFingerprint
+        if (newFp.isEmpty()) return@Runnable
+
+        // If we didn't have a fingerprint yet for the initial reel, lock it in without double-counting
+        if (currentReelFingerprint.isEmpty()) {
+            currentReelFingerprint = newFp
+            rememberFingerprint(newFp)
+            return@Runnable
+        }
+
+        // ONLY count +1 if the static Reel Identity Fingerprint (Creator + Right-Rail Counts)
+        // has genuinely changed to a DIFFERENT video not currently playing!
+        if (newFp != currentReelFingerprint && !recentFingerprints.contains(newFp)) {
+            currentReelFingerprint = newFp
+            rememberFingerprint(newFp)
             lastCountedTimeMs = now
-            accumulatedVerticalDelta = 0
             recordAndBroadcastReel(currentReelPackage)
         }
     }
 
+    private fun rememberFingerprint(fp: String) {
+        if (fp.isEmpty()) return
+        recentFingerprints.remove(fp)
+        recentFingerprints.addLast(fp)
+        while (recentFingerprints.size > 4) {
+            recentFingerprints.removeFirst()
+        }
+    }
+
     companion object {
-        // Minimum time between two consecutive reel counts
-        private const val SWIPE_COOLDOWN_MS = 1200L
+        // Minimum cooldown between two real reel swipes
+        private const val SWIPE_COOLDOWN_MS = 1400L
+        // Wait 380ms after a scroll event finishes settling before reading the new Reel's fingerprint
+        private const val SCROLL_SETTLE_DELAY_MS = 380L
 
         private val TIMESTAMP_REGEX = Regex("\\b\\d{1,2}:\\d{2}\\b")
-        private val PURE_NUMBER_REGEX = Regex("^[0-9.,]+[KMBkmb]?$")
 
-        private val PLAYBACK_STATE_WORDS = setOf(
+        private val IGNORED_UI_WORDS = setOf(
             "pause", "paused", "play", "playing", "mute", "muted", "unmute", "unmuted",
             "volume", "loading", "buffering", "like", "liked", "comment", "comments",
-            "share", "send", "follow", "following", "subscribe", "subscribed", "reels", "shorts"
+            "share", "send", "follow", "following", "subscribe", "subscribed",
+            "reels", "shorts", "for you", "sponsored", "ad"
         )
 
         private val NON_PAGER_WIDGET_CLASSES = listOf(
@@ -197,160 +221,114 @@ class ReelAccessibilityService : AccessibilityService() {
 
         val now = System.currentTimeMillis()
 
-        // Track tap/click events so a tap-to-pause gesture is never mistaken for a vertical reel swipe
+        // Track tap/click events so tapping to pause/play is never treated as a swipe
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
             lastClickTimeMs = now
-            accumulatedVerticalDelta = 0
+            mainHandler.removeCallbacks(verifyReelChangeRunnable)
             return
         }
 
-        // Handle Scroll Events ONLY from full-screen vertical Reel/Shorts containers
+        // Handle Scroll Events
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
             handleScrollEvent(event, pkg, now)
             return
         }
 
-        // For window state/content changes, ONLY update Reel mode visibility (NEVER increment counter in-place!)
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
-        ) {
-            // Avoid expensive tree scans on every frame of video playback if we already checked recently
-            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
-                isInReelMode &&
-                currentReelPackage == pkg &&
-                (now - lastFullPagerScrollTimeMs) > 2000L
-            ) {
-                return
-            }
-
+        // Window State Changes: only used to enter or exit Reel Mode (never increments while already watching)
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val root = rootInActiveWindow ?: findActiveAppRoot(pkg)
             val snapshot = analyzeWindowForReels(pkg, root)
 
             if (!snapshot.isReelScreen) {
-                if (isInReelMode && (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || snapshot.isDefinitelyNonReelScreen)) {
+                if (isInReelMode) {
                     exitReelMode()
                 }
                 return
             }
 
-            // User just entered Reels/Shorts mode from another screen or app
             if (!isInReelMode || currentReelPackage != pkg) {
-                isInReelMode = true
-                currentReelPackage = pkg
-                lastConfirmedSignature = snapshot.stableSignature
-                lastConfirmedPageIndex = -999
-                accumulatedVerticalDelta = 0
-
-                // Count the initial Reel when first entering the Reel/Shorts viewer
-                if (now - lastCountedTimeMs >= 2500L) {
-                    lastCountedTimeMs = now
-                    recordAndBroadcastReel(pkg)
-                } else {
-                    showOverlayForPackage(pkg)
-                }
-            } else if (lastConfirmedSignature.isEmpty() && snapshot.stableSignature.isNotEmpty()) {
-                lastConfirmedSignature = snapshot.stableSignature
+                enterReelMode(pkg, snapshot.reelFingerprint, now)
+            } else if (currentReelFingerprint.isEmpty() && snapshot.reelFingerprint.isNotEmpty()) {
+                currentReelFingerprint = snapshot.reelFingerprint
+                rememberFingerprint(snapshot.reelFingerprint)
             }
         }
     }
 
+    private fun enterReelMode(pkg: String, initialFingerprint: String, now: Long) {
+        isInReelMode = true
+        currentReelPackage = pkg
+        recentFingerprints.clear()
+        if (initialFingerprint.isNotEmpty()) {
+            currentReelFingerprint = initialFingerprint
+            rememberFingerprint(initialFingerprint)
+        } else {
+            currentReelFingerprint = ""
+        }
+
+        // Count the first Reel when entering the Reel/Shorts player (with 3s guard against rapid tab switches)
+        if (now - lastCountedTimeMs >= 3000L) {
+            lastCountedTimeMs = now
+            recordAndBroadcastReel(pkg)
+        } else {
+            showOverlayForPackage(pkg)
+        }
+    }
+
     private fun handleScrollEvent(event: AccessibilityEvent, pkg: String, now: Long) {
-        // 1. Reject SeekBars, ProgressBars, TextViews (audio marquees), and horizontal carousels
+        // 1. Ignore SeekBars, ProgressBars, TextViews, and small widgets
         val clsName = event.className?.toString()?.lowercase(Locale.ROOT) ?: ""
         for (nonPager in NON_PAGER_WIDGET_CLASSES) {
             if (clsName.contains(nonPager)) return
+        }
+
+        // 2. Ignore 0-100% video progress scrubbers that emit itemCount == 100 or 1000
+        if (event.itemCount == 100 || event.itemCount == 1000) {
+            return
+        }
+
+        // 3. Ignore scroll events right after a tap-to-pause click
+        if (now - lastClickTimeMs < 400L) {
+            return
         }
 
         val dm = resources.displayMetrics
         val screenW = dm.widthPixels.coerceAtLeast(1)
         val screenH = dm.heightPixels.coerceAtLeast(1)
 
-        // 2. Check the bounds of the view that scrolled: must be a large vertical container, not a bottom scrubber bar
+        // 4. If the event exposes its source node, verify it is a full-screen vertical container
         val sourceNode = try { event.source } catch (_: Exception) { null }
         if (sourceNode != null) {
             val bounds = Rect()
             sourceNode.getBoundsInScreen(bounds)
-            if (bounds.height() < screenH * 0.55 || bounds.width() < screenW * 0.70) {
-                // Too small to be the full-screen Reel pager (e.g. a video seekbar or comment ticker)
+            if (bounds.height() < screenH * 0.60 || bounds.width() < screenW * 0.75) {
                 return
             }
         }
 
-        // 3. Reject horizontal scrolls
+        // 5. Reject horizontal scrolls
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val dx = abs(event.scrollDeltaX)
             val dy = abs(event.scrollDeltaY)
-            if (dx > dy && dx > 40) return
+            if (dx > dy && dx > 30) return
+            // If scrollDeltaY is reported, ignore tiny micro-jitters (< 8% of screen height)
+            if (dy in 1..(screenH * 0.08).toInt()) return
         }
 
-        // 4. Ignore tiny touch jitter within 350ms of tapping to pause/unpause
-        if (now - lastClickTimeMs < 350L) {
-            val dy = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) abs(event.scrollDeltaY) else 0
-            if (dy < screenH * 0.15) return
-        }
-
-        // Ensure we are actually on a Reel/Shorts screen
+        // If not yet in Reel Mode, check if this scroll happened inside a Reel/Shorts player
         if (!isInReelMode || currentReelPackage != pkg) {
             val root = rootInActiveWindow ?: findActiveAppRoot(pkg)
             val snapshot = analyzeWindowForReels(pkg, root)
-            if (!snapshot.isReelScreen) return
-            isInReelMode = true
-            currentReelPackage = pkg
-            lastConfirmedSignature = snapshot.stableSignature
-            lastConfirmedPageIndex = event.fromIndex
-            lastCountedTimeMs = now
-            recordAndBroadcastReel(pkg)
-            return
-        }
-
-        lastFullPagerScrollTimeMs = now
-
-        // CASE A: The pager reports valid item indices (e.g. RecyclerView / ViewPager2)
-        if (event.fromIndex >= 0 && event.itemCount > 1) {
-            if (lastConfirmedPageIndex == -999) {
-                lastConfirmedPageIndex = event.fromIndex
-            } else if (event.fromIndex != lastConfirmedPageIndex) {
-                // The visible Reel page index genuinely changed!
-                lastConfirmedPageIndex = event.fromIndex
-                if (now - lastCountedTimeMs >= SWIPE_COOLDOWN_MS) {
-                    lastCountedTimeMs = now
-                    accumulatedVerticalDelta = 0
-                    val root = rootInActiveWindow ?: findActiveAppRoot(pkg)
-                    val snap = analyzeWindowForReels(pkg, root)
-                    if (snap.stableSignature.isNotEmpty()) {
-                        lastConfirmedSignature = snap.stableSignature
-                    }
-                    recordAndBroadcastReel(pkg)
-                }
+            if (snapshot.isReelScreen) {
+                enterReelMode(pkg, snapshot.reelFingerprint, now)
             }
             return
         }
 
-        // CASE B: Pager reports `fromIndex == -1`
-        // Track vertical scroll distance if available on API 28+
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && event.scrollDeltaY != 0) {
-            if (now - lastFullPagerScrollTimeMs > 1200L) {
-                accumulatedVerticalDelta = 0
-            }
-            accumulatedVerticalDelta += abs(event.scrollDeltaY)
-            // Require scrolling at least 25% of the screen height to count as a page flip
-            if (accumulatedVerticalDelta >= (screenH * 0.25).toInt() &&
-                now - lastCountedTimeMs >= SWIPE_COOLDOWN_MS
-            ) {
-                accumulatedVerticalDelta = 0
-                lastCountedTimeMs = now
-                recordAndBroadcastReel(pkg)
-                return
-            }
-        }
-
-        // CASE C: Pager reports neither `fromIndex` nor `scrollDeltaY` (e.g. custom ViewPager snap event)
-        // Schedule a settle check 320ms after the scroll event to verify if the Creator/Caption changed
-        if (!pendingScrollVerifyScheduled) {
-            pendingScrollVerifyScheduled = true
-            mainHandler.removeCallbacks(verifyScrollTransitionRunnable)
-            mainHandler.postDelayed(verifyScrollTransitionRunnable, 320L)
-        }
+        // Debounce: reset the 380ms settle timer on each scroll frame so we only inspect the window
+        // AFTER the swipe animation finishes snapping to the new Reel!
+        mainHandler.removeCallbacks(verifyReelChangeRunnable)
+        mainHandler.postDelayed(verifyReelChangeRunnable, SCROLL_SETTLE_DELAY_MS)
     }
 
     private fun findActiveAppRoot(targetPkg: String): AccessibilityNodeInfo? {
@@ -392,11 +370,9 @@ class ReelAccessibilityService : AccessibilityService() {
     private fun exitReelMode() {
         isInReelMode = false
         currentReelPackage = ""
-        lastConfirmedSignature = ""
-        lastConfirmedPageIndex = -999
-        accumulatedVerticalDelta = 0
-        pendingScrollVerifyScheduled = false
-        mainHandler.removeCallbacks(verifyScrollTransitionRunnable)
+        currentReelFingerprint = ""
+        recentFingerprints.clear()
+        mainHandler.removeCallbacks(verifyReelChangeRunnable)
 
         val hideIntent = Intent(OverlayService.ACTION_SET_OVERLAY_VISIBILITY).apply {
             setPackage(packageName)
@@ -408,15 +384,23 @@ class ReelAccessibilityService : AccessibilityService() {
     private data class WindowReelAnalysis(
         val isReelScreen: Boolean,
         val isDefinitelyNonReelScreen: Boolean,
-        val stableSignature: String
+        val reelFingerprint: String
     )
 
+    /**
+     * Inspects the active window to determine:
+     * 1. Whether the screen is a Reel/Shorts player.
+     * 2. A static `reelFingerprint` composed strictly of:
+     *    - Right-rail action button counts/labels (Like count, Comment count, Share count)
+     *    - Creator handle (`@username` or short clickable author name)
+     *    EXCLUDING multi-word subtitles/captions and video timers so long videos never change fingerprint!
+     */
     private fun analyzeWindowForReels(pkg: String, root: AccessibilityNodeInfo?): WindowReelAnalysis {
         if (root == null) {
             return WindowReelAnalysis(
                 isReelScreen = isInReelMode && currentReelPackage == pkg,
                 isDefinitelyNonReelScreen = false,
-                stableSignature = lastConfirmedSignature
+                reelFingerprint = currentReelFingerprint
             )
         }
 
@@ -433,8 +417,10 @@ class ReelAccessibilityService : AccessibilityService() {
         var hasReelOverlayPhrase = false
         var hasFullScreenVerticalContainer = false
         var engagementWordMatches = 0
+
         val rightRailActionYPositions = mutableListOf<Int>()
-        val stableCreatorOrCaptionTokens = mutableListOf<String>()
+        val rightRailStaticLabels = mutableListOf<String>()
+        var creatorHandleToken: String = ""
 
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
@@ -455,6 +441,7 @@ class ReelAccessibilityService : AccessibilityService() {
             val w = bounds.width()
             val h = bounds.height()
 
+            // 1. Full-screen vertical container check
             if (!hasFullScreenVerticalContainer && w >= screenW * 0.80 && h >= screenH * 0.65) {
                 val cls = node.className?.toString()?.lowercase(Locale.ROOT) ?: ""
                 if (node.isScrollable || cls.contains("pager") || cls.contains("recycler") ||
@@ -464,20 +451,47 @@ class ReelAccessibilityService : AccessibilityService() {
                 }
             }
 
-            if (node.isClickable &&
-                bounds.left >= screenW * 0.72 &&
+            // 2. Right-Rail Vertical Action Column (70%..100% width, 20%..90% height)
+            // Collect both button positions AND static engagement counts (e.g. "24.3K", "512")
+            if (bounds.left >= screenW * 0.70 &&
                 bounds.right <= screenW &&
-                bounds.top >= screenH * 0.22 &&
-                bounds.bottom <= screenH * 0.90 &&
-                w in 24..(screenW * 0.28).toInt() &&
-                h in 24..(screenH * 0.16).toInt()
+                bounds.top >= screenH * 0.20 &&
+                bounds.bottom <= screenH * 0.90
             ) {
-                val centerY = bounds.centerY()
-                if (rightRailActionYPositions.none { abs(it - centerY) < (screenH * 0.04) }) {
-                    rightRailActionYPositions.add(centerY)
+                if (node.isClickable && w in 24..(screenW * 0.28).toInt() && h in 24..(screenH * 0.16).toInt()) {
+                    val centerY = bounds.centerY()
+                    if (rightRailActionYPositions.none { abs(it - centerY) < (screenH * 0.04) }) {
+                        rightRailActionYPositions.add(centerY)
+                    }
+                }
+                val railToken = if (text.isNotEmpty()) text else desc
+                if (railToken.isNotEmpty() &&
+                    railToken.length <= 28 &&
+                    !TIMESTAMP_REGEX.containsMatchIn(railToken) &&
+                    !IGNORED_UI_WORDS.contains(railToken.lowercase(Locale.ROOT)) &&
+                    rightRailStaticLabels.size < 4
+                ) {
+                    rightRailStaticLabels.add(railToken)
                 }
             }
 
+            // 3. Creator Handle (@username or short clickable author handle in lower-left, never multi-sentence captions)
+            if (creatorHandleToken.isEmpty() && text.length in 3..28) {
+                if (text.startsWith("@") && !text.contains(" ")) {
+                    creatorHandleToken = text
+                } else if (node.isClickable &&
+                    bounds.left < screenW * 0.65 &&
+                    bounds.top >= screenH * 0.55 &&
+                    bounds.bottom <= screenH * 0.92 &&
+                    !TIMESTAMP_REGEX.containsMatchIn(text) &&
+                    !IGNORED_UI_WORDS.contains(lowerText) &&
+                    text.count { it == ' ' } <= 1
+                ) {
+                    creatorHandleToken = text
+                }
+            }
+
+            // 4. Explicit Reel / Shorts View IDs
             if (!hasReelViewId && viewId.isNotEmpty()) {
                 for (kw in REEL_VIEW_ID_KEYWORDS) {
                     if (viewId.contains(kw)) {
@@ -487,6 +501,7 @@ class ReelAccessibilityService : AccessibilityService() {
                 }
             }
 
+            // 5. Selected navigation tabs
             if (node.isSelected) {
                 if (lowerText == "reels" || lowerText == "shorts" || lowerText == "spotlight" ||
                     lowerDesc.contains("reels") || lowerDesc.contains("shorts")
@@ -500,6 +515,7 @@ class ReelAccessibilityService : AccessibilityService() {
                 }
             }
 
+            // 6. Reel overlay phrases
             if (!hasReelOverlayPhrase) {
                 for (phrase in REEL_OVERLAY_PHRASES) {
                     if (lowerText.contains(phrase) || lowerDesc.contains(phrase)) {
@@ -509,6 +525,7 @@ class ReelAccessibilityService : AccessibilityService() {
                 }
             }
 
+            // 7. Social engagement words
             if (lowerDesc.contains("like") || lowerText == "like" ||
                 lowerDesc.contains("comment") || lowerText == "comment" ||
                 lowerDesc.contains("share") || lowerDesc.contains("send") ||
@@ -516,18 +533,6 @@ class ReelAccessibilityService : AccessibilityService() {
                 lowerDesc.contains("sound")
             ) {
                 engagementWordMatches++
-            }
-
-            // Collect ONLY static creator handle / caption anchor tokens (ignore timers, counts, and pause/play labels)
-            if (stableCreatorOrCaptionTokens.size < 3 && text.length in 3..45) {
-                if (bounds.left < screenW * 0.70 && bounds.top >= screenH * 0.50 && bounds.bottom <= screenH * 0.92) {
-                    if (!TIMESTAMP_REGEX.containsMatchIn(text) &&
-                        !PURE_NUMBER_REGEX.matches(text) &&
-                        !PLAYBACK_STATE_WORDS.contains(lowerText)
-                    ) {
-                        stableCreatorOrCaptionTokens.add(text)
-                    }
-                }
             }
 
             val count = node.childCount
@@ -553,12 +558,17 @@ class ReelAccessibilityService : AccessibilityService() {
             )
         }
 
-        val stableSig = stableCreatorOrCaptionTokens.distinct().take(2).joinToString("|")
+        val fpBuilder = mutableListOf<String>()
+        if (creatorHandleToken.isNotEmpty()) {
+            fpBuilder.add(creatorHandleToken)
+        }
+        fpBuilder.addAll(rightRailStaticLabels.distinct().take(3))
+        val fingerprint = fpBuilder.joinToString("|")
 
         return WindowReelAnalysis(
             isReelScreen = isReelScreen,
             isDefinitelyNonReelScreen = hasSelectedNonReelTab,
-            stableSignature = stableSig
+            reelFingerprint = fingerprint
         )
     }
 
