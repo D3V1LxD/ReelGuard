@@ -16,22 +16,19 @@ import kotlin.math.abs
 /**
  * Precision Reel & Short-Form Video Detector for Android.
  *
- * Specifically engineered so LONG VIDEOS, PAUSED VIDEOS, and SUBTITLES never cause false counts:
- * 1. Unified Post-Swipe Settle Verification:
- *    - A Reel count NEVER increments blindly on a raw scroll event (because long videos contain
- *      auto-scrolling subtitles, lyrics, comment tickers, and custom progress scrubbers that
- *      periodically emit `TYPE_VIEW_SCROLLED`).
- *    - Instead, every candidate vertical pager scroll schedules a single post-settle check (380ms
- *      after scrolling stops) that inspects the static **Reel Identity Fingerprint**.
- * 2. Static Reel Identity Fingerprint (Immune to Subtitles & Timers):
- *    - Built strictly from static per-video anchors that NEVER change while a single long video plays:
- *      (a) The Right-Rail Action Button Counts (Like count, Comment count, Share/Save count located
- *          in the right column `bounds.left >= 70%` of screen width), and
- *      (b) The static Creator Handle (`@username` or clickable short channel title),
- *      completely ignoring multi-word closed captions/subtitles and video progress timers.
- * 3. Seen-Reel Fingerprint Memory:
- *    - Remembers the current and recently seen Reel fingerprints so the same long video cannot
- *      be counted more than once no matter how long it plays or how many times it is paused.
+ * Strictly excludes Inbox / Direct Messages / Chat threads / Story viewers / Photos:
+ * 1. Explicit Inbox, DM, Story & Photo Exclusion:
+ *    - Rejects any screen containing an editable text input (`EditText` / `isEditable`, such as
+ *      "Message...", "Send message", or "Reply..." bars present in Inbox chats, DM media viewers, and Stories).
+ *    - Rejects view IDs belonging to Direct Messages, Chat threads, or Instagram Stories/DM viewers
+ *      (`direct_`, `thread_`, `inbox`, `message`, `composer`, `conversation`, and Instagram's
+ *      `reel_viewer` which is used for Stories/DM disappearing media, whereas Instagram Reels uses `clips_viewer`).
+ *    - Rejects screens with chat/call indicators ("audio call", "video call", "active now", "seen",
+ *      "delivered", "write a message", "send a message", "photo by").
+ * 2. Requires True Reel/Shorts Vertical Player Structure:
+ *    - Requires the vertical right-rail action column (3+ stacked action icons on the right edge
+ *      `bounds.left >= 70%` width) or explicit `clips_viewer` / `shorts` / `reel_recycler` IDs,
+ *      plus a verified change in the static Creator + Right-Rail count fingerprint on swipe.
  */
 class ReelAccessibilityService : AccessibilityService() {
 
@@ -65,15 +62,12 @@ class ReelAccessibilityService : AccessibilityService() {
         val newFp = snapshot.reelFingerprint
         if (newFp.isEmpty()) return@Runnable
 
-        // If we didn't have a fingerprint yet for the initial reel, lock it in without double-counting
         if (currentReelFingerprint.isEmpty()) {
             currentReelFingerprint = newFp
             rememberFingerprint(newFp)
             return@Runnable
         }
 
-        // ONLY count +1 if the static Reel Identity Fingerprint (Creator + Right-Rail Counts)
-        // has genuinely changed to a DIFFERENT video not currently playing!
         if (newFp != currentReelFingerprint && !recentFingerprints.contains(newFp)) {
             currentReelFingerprint = newFp
             rememberFingerprint(newFp)
@@ -92,9 +86,7 @@ class ReelAccessibilityService : AccessibilityService() {
     }
 
     companion object {
-        // Minimum cooldown between two real reel swipes
         private const val SWIPE_COOLDOWN_MS = 1400L
-        // Wait 380ms after a scroll event finishes settling before reading the new Reel's fingerprint
         private const val SCROLL_SETTLE_DELAY_MS = 380L
 
         private val TIMESTAMP_REGEX = Regex("\\b\\d{1,2}:\\d{2}\\b")
@@ -119,17 +111,26 @@ class ReelAccessibilityService : AccessibilityService() {
             "checkbox"
         )
 
-        private val SYSTEM_OR_NON_VIDEO_PACKAGES = setOf(
+        // Dedicated messaging, system, and non-reel apps that must NEVER be counted
+        private val EXCLUDED_PACKAGES = setOf(
             "com.android.systemui",
             "com.android.settings",
             "com.android.vending",
             "com.google.android.gm",
             "com.whatsapp",
+            "com.whatsapp.w4b",
+            "com.facebook.orca",             // Facebook Messenger
+            "com.facebook.mlite",            // Messenger Lite
+            "org.telegram.messenger",        // Telegram
+            "com.discord",                   // Discord
             "com.google.android.apps.messaging",
             "com.google.android.dialer",
             "com.android.contacts",
             "com.google.android.calculator",
-            "com.google.android.calendar"
+            "com.google.android.calendar",
+            "com.google.android.apps.photos",
+            "com.sec.android.gallery3d",
+            "com.miui.gallery"
         )
 
         private val DEDICATED_SHORT_VIDEO_APPS = setOf(
@@ -143,11 +144,12 @@ class ReelAccessibilityService : AccessibilityService() {
             "io.chingari.app"                // Chingari
         )
 
+        // Note: In Instagram (`com.instagram.android`), `reel_viewer` is Stories / Direct Inbox visual media,
+        // while `clips_viewer` / `clips_video` is Instagram Reels!
         private val REEL_VIEW_ID_KEYWORDS = listOf(
             "clips_viewer",
             "clips_video",
             "clips_item",
-            "reel_viewer",
             "reel_recycler",
             "reel_player",
             "reel_watch",
@@ -155,9 +157,48 @@ class ReelAccessibilityService : AccessibilityService() {
             "shorts_page",
             "shorts_container",
             "fb_shorts",
-            "short_form_video",
-            "vertical_video",
-            "immersive_viewer"
+            "short_form_video"
+        )
+
+        // View IDs that definitively belong to Inbox, Direct Messages, Chat threads, Stories, or Gallery viewers
+        private val INBOX_OR_CHAT_VIEW_ID_KEYWORDS = listOf(
+            "direct_",
+            "row_inbox",
+            "inbox_",
+            "thread_",
+            "row_thread",
+            "message_list",
+            "message_composer",
+            "row_message",
+            "chat_",
+            "conversation",
+            "composer",
+            "reel_viewer",        // Instagram Stories & Direct Inbox disappearing photo/video viewer
+            "story_viewer",
+            "raven_",             // Instagram Direct disappearing photo/video camera & viewer
+            "media_viewer",
+            "gallery"
+        )
+
+        // On-screen text or content descriptions that indicate an Inbox chat, DM media viewer, Story, or regular feed
+        private val INBOX_OR_NON_REEL_PHRASES = listOf(
+            "send message",
+            "send a message",
+            "write a message",
+            "type a message",
+            "message...",
+            "reply to ",
+            "reply...",
+            "audio call",
+            "video call",
+            "voice message",
+            "active now",
+            "active today",
+            "typing...",
+            " your story",
+            "add to story",
+            "what's on your mind",
+            "photo by "
         )
 
         private val REEL_OVERLAY_PHRASES = listOf(
@@ -167,10 +208,7 @@ class ReelAccessibilityService : AccessibilityService() {
             "remix this",
             "reels and short videos",
             "reel player",
-            "shorts player",
-            "send post",
-            "share reel",
-            "share short"
+            "shorts player"
         )
     }
 
@@ -205,13 +243,14 @@ class ReelAccessibilityService : AccessibilityService() {
             return
         }
 
-        // Hide overlay immediately when user goes to Home Screen Launcher, Settings, or ReelGuard itself
+        // Hide overlay immediately when user is in Messenger, WhatsApp, Gallery, Home Launcher, Settings, or ReelGuard
         if (pkg == packageName ||
             pkg.contains("launcher") ||
             pkg.contains("miui.home") ||
             pkg.contains("oppo.launcher") ||
             pkg.contains("oneplus.launcher") ||
-            SYSTEM_OR_NON_VIDEO_PACKAGES.contains(pkg)
+            pkg.contains("gallery") ||
+            EXCLUDED_PACKAGES.contains(pkg)
         ) {
             if (isInReelMode) {
                 exitReelMode()
@@ -221,20 +260,17 @@ class ReelAccessibilityService : AccessibilityService() {
 
         val now = System.currentTimeMillis()
 
-        // Track tap/click events so tapping to pause/play is never treated as a swipe
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
             lastClickTimeMs = now
             mainHandler.removeCallbacks(verifyReelChangeRunnable)
             return
         }
 
-        // Handle Scroll Events
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
             handleScrollEvent(event, pkg, now)
             return
         }
 
-        // Window State Changes: only used to enter or exit Reel Mode (never increments while already watching)
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val root = rootInActiveWindow ?: findActiveAppRoot(pkg)
             val snapshot = analyzeWindowForReels(pkg, root)
@@ -266,7 +302,6 @@ class ReelAccessibilityService : AccessibilityService() {
             currentReelFingerprint = ""
         }
 
-        // Count the first Reel when entering the Reel/Shorts player (with 3s guard against rapid tab switches)
         if (now - lastCountedTimeMs >= 3000L) {
             lastCountedTimeMs = now
             recordAndBroadcastReel(pkg)
@@ -276,18 +311,15 @@ class ReelAccessibilityService : AccessibilityService() {
     }
 
     private fun handleScrollEvent(event: AccessibilityEvent, pkg: String, now: Long) {
-        // 1. Ignore SeekBars, ProgressBars, TextViews, and small widgets
         val clsName = event.className?.toString()?.lowercase(Locale.ROOT) ?: ""
         for (nonPager in NON_PAGER_WIDGET_CLASSES) {
             if (clsName.contains(nonPager)) return
         }
 
-        // 2. Ignore 0-100% video progress scrubbers that emit itemCount == 100 or 1000
         if (event.itemCount == 100 || event.itemCount == 1000) {
             return
         }
 
-        // 3. Ignore scroll events right after a tap-to-pause click
         if (now - lastClickTimeMs < 400L) {
             return
         }
@@ -296,9 +328,15 @@ class ReelAccessibilityService : AccessibilityService() {
         val screenW = dm.widthPixels.coerceAtLeast(1)
         val screenH = dm.heightPixels.coerceAtLeast(1)
 
-        // 4. If the event exposes its source node, verify it is a full-screen vertical container
         val sourceNode = try { event.source } catch (_: Exception) { null }
         if (sourceNode != null) {
+            val srcId = sourceNode.viewIdResourceName?.lowercase(Locale.ROOT) ?: ""
+            for (inboxId in INBOX_OR_CHAT_VIEW_ID_KEYWORDS) {
+                if (srcId.contains(inboxId)) {
+                    if (isInReelMode) exitReelMode()
+                    return
+                }
+            }
             val bounds = Rect()
             sourceNode.getBoundsInScreen(bounds)
             if (bounds.height() < screenH * 0.60 || bounds.width() < screenW * 0.75) {
@@ -306,16 +344,14 @@ class ReelAccessibilityService : AccessibilityService() {
             }
         }
 
-        // 5. Reject horizontal scrolls
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val dx = abs(event.scrollDeltaX)
             val dy = abs(event.scrollDeltaY)
+            // Reject horizontal photo/carousel swipes
             if (dx > dy && dx > 30) return
-            // If scrollDeltaY is reported, ignore tiny micro-jitters (< 8% of screen height)
             if (dy in 1..(screenH * 0.08).toInt()) return
         }
 
-        // If not yet in Reel Mode, check if this scroll happened inside a Reel/Shorts player
         if (!isInReelMode || currentReelPackage != pkg) {
             val root = rootInActiveWindow ?: findActiveAppRoot(pkg)
             val snapshot = analyzeWindowForReels(pkg, root)
@@ -325,8 +361,6 @@ class ReelAccessibilityService : AccessibilityService() {
             return
         }
 
-        // Debounce: reset the 380ms settle timer on each scroll frame so we only inspect the window
-        // AFTER the swipe animation finishes snapping to the new Reel!
         mainHandler.removeCallbacks(verifyReelChangeRunnable)
         mainHandler.postDelayed(verifyReelChangeRunnable, SCROLL_SETTLE_DELAY_MS)
     }
@@ -387,14 +421,6 @@ class ReelAccessibilityService : AccessibilityService() {
         val reelFingerprint: String
     )
 
-    /**
-     * Inspects the active window to determine:
-     * 1. Whether the screen is a Reel/Shorts player.
-     * 2. A static `reelFingerprint` composed strictly of:
-     *    - Right-rail action button counts/labels (Like count, Comment count, Share count)
-     *    - Creator handle (`@username` or short clickable author name)
-     *    EXCLUDING multi-word subtitles/captions and video timers so long videos never change fingerprint!
-     */
     private fun analyzeWindowForReels(pkg: String, root: AccessibilityNodeInfo?): WindowReelAnalysis {
         if (root == null) {
             return WindowReelAnalysis(
@@ -412,11 +438,13 @@ class ReelAccessibilityService : AccessibilityService() {
         val screenH = dm.heightPixels.coerceAtLeast(1)
 
         var hasReelViewId = false
+        var hasInboxOrChatOrStorySignal = false
+        var hasEditableMessageField = false
         var hasSelectedReelTab = false
         var hasSelectedNonReelTab = false
         var hasReelOverlayPhrase = false
         var hasFullScreenVerticalContainer = false
-        var engagementWordMatches = 0
+        var hasLikeAndComment = 0
 
         val rightRailActionYPositions = mutableListOf<Int>()
         val rightRailStaticLabels = mutableListOf<String>()
@@ -426,41 +454,63 @@ class ReelAccessibilityService : AccessibilityService() {
         queue.add(root)
         var visited = 0
 
-        while (!queue.isEmpty() && visited < 360) {
+        while (!queue.isEmpty() && visited < 380) {
             val node = queue.removeFirst()
             visited++
 
             val viewId = node.viewIdResourceName?.lowercase(Locale.ROOT) ?: ""
+            val clsName = node.className?.toString()?.lowercase(Locale.ROOT) ?: ""
             val text = node.text?.toString()?.trim() ?: ""
             val desc = node.contentDescription?.toString()?.trim() ?: ""
             val lowerText = text.lowercase(Locale.ROOT)
             val lowerDesc = desc.lowercase(Locale.ROOT)
+
+            // 1. Check for Editable Text Field (Message composer / Reply bar / Search bar -> NEVER a Reel viewer!)
+            if (node.isEditable || clsName.contains("edittext")) {
+                hasEditableMessageField = true
+            }
+
+            // 2. Check for Inbox, Direct Message, Chat Thread, Story, or Media Viewer View IDs
+            if (!hasInboxOrChatOrStorySignal && viewId.isNotEmpty()) {
+                for (inboxKw in INBOX_OR_CHAT_VIEW_ID_KEYWORDS) {
+                    if (viewId.contains(inboxKw)) {
+                        hasInboxOrChatOrStorySignal = true
+                        break
+                    }
+                }
+            }
+
+            // 3. Check for Inbox / DM / Story / Call / Photo phrases in text or contentDescription
+            if (!hasInboxOrChatOrStorySignal) {
+                for (phrase in INBOX_OR_NON_REEL_PHRASES) {
+                    if (lowerText.contains(phrase) || lowerDesc.contains(phrase)) {
+                        hasInboxOrChatOrStorySignal = true
+                        break
+                    }
+                }
+            }
 
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
             val w = bounds.width()
             val h = bounds.height()
 
-            // 1. Full-screen vertical container check
+            // 4. Full-screen vertical container check
             if (!hasFullScreenVerticalContainer && w >= screenW * 0.80 && h >= screenH * 0.65) {
-                val cls = node.className?.toString()?.lowercase(Locale.ROOT) ?: ""
-                if (node.isScrollable || cls.contains("pager") || cls.contains("recycler") ||
-                    cls.contains("surface") || cls.contains("texture") || cls.contains("video")
-                ) {
+                if (node.isScrollable || clsName.contains("pager") || clsName.contains("recycler")) {
                     hasFullScreenVerticalContainer = true
                 }
             }
 
-            // 2. Right-Rail Vertical Action Column (70%..100% width, 20%..90% height)
-            // Collect both button positions AND static engagement counts (e.g. "24.3K", "512")
-            if (bounds.left >= screenW * 0.70 &&
+            // 5. Right-Rail Vertical Action Column (72%..100% width, 25%..88% height)
+            if (bounds.left >= screenW * 0.72 &&
                 bounds.right <= screenW &&
-                bounds.top >= screenH * 0.20 &&
-                bounds.bottom <= screenH * 0.90
+                bounds.top >= screenH * 0.25 &&
+                bounds.bottom <= screenH * 0.88
             ) {
-                if (node.isClickable && w in 24..(screenW * 0.28).toInt() && h in 24..(screenH * 0.16).toInt()) {
+                if (node.isClickable && w in 24..(screenW * 0.26).toInt() && h in 24..(screenH * 0.14).toInt()) {
                     val centerY = bounds.centerY()
-                    if (rightRailActionYPositions.none { abs(it - centerY) < (screenH * 0.04) }) {
+                    if (rightRailActionYPositions.none { abs(it - centerY) < (screenH * 0.05) }) {
                         rightRailActionYPositions.add(centerY)
                     }
                 }
@@ -475,14 +525,14 @@ class ReelAccessibilityService : AccessibilityService() {
                 }
             }
 
-            // 3. Creator Handle (@username or short clickable author handle in lower-left, never multi-sentence captions)
+            // 6. Creator Handle (@username or short clickable author handle in lower-left)
             if (creatorHandleToken.isEmpty() && text.length in 3..28) {
                 if (text.startsWith("@") && !text.contains(" ")) {
                     creatorHandleToken = text
                 } else if (node.isClickable &&
                     bounds.left < screenW * 0.65 &&
                     bounds.top >= screenH * 0.55 &&
-                    bounds.bottom <= screenH * 0.92 &&
+                    bounds.bottom <= screenH * 0.90 &&
                     !TIMESTAMP_REGEX.containsMatchIn(text) &&
                     !IGNORED_UI_WORDS.contains(lowerText) &&
                     text.count { it == ' ' } <= 1
@@ -491,7 +541,7 @@ class ReelAccessibilityService : AccessibilityService() {
                 }
             }
 
-            // 4. Explicit Reel / Shorts View IDs
+            // 7. Explicit Reel / Shorts View IDs (e.g. clips_viewer, reel_recycler, shorts_player)
             if (!hasReelViewId && viewId.isNotEmpty()) {
                 for (kw in REEL_VIEW_ID_KEYWORDS) {
                     if (viewId.contains(kw)) {
@@ -501,21 +551,23 @@ class ReelAccessibilityService : AccessibilityService() {
                 }
             }
 
-            // 5. Selected navigation tabs
+            // 8. Selected navigation tabs
             if (node.isSelected) {
                 if (lowerText == "reels" || lowerText == "shorts" || lowerText == "spotlight" ||
                     lowerDesc.contains("reels") || lowerDesc.contains("shorts")
                 ) {
                     hasSelectedReelTab = true
-                } else if (lowerText == "messages" || lowerText == "chats" || lowerText == "inbox" ||
-                    lowerText == "notifications" || lowerText == "settings" ||
-                    lowerDesc == "inbox" || lowerDesc == "direct" || lowerDesc == "messages"
+                } else if (lowerText == "home" || lowerText == "messages" || lowerText == "chats" ||
+                    lowerText == "inbox" || lowerText == "notifications" || lowerText == "profile" ||
+                    lowerText == "friends" || lowerText == "settings" ||
+                    lowerDesc == "home" || lowerDesc == "inbox" || lowerDesc == "direct" ||
+                    lowerDesc == "messages" || lowerDesc == "profile"
                 ) {
                     hasSelectedNonReelTab = true
                 }
             }
 
-            // 6. Reel overlay phrases
+            // 9. Reel overlay phrases (e.g. "original audio", "use audio", "remix this")
             if (!hasReelOverlayPhrase) {
                 for (phrase in REEL_OVERLAY_PHRASES) {
                     if (lowerText.contains(phrase) || lowerDesc.contains(phrase)) {
@@ -525,14 +577,12 @@ class ReelAccessibilityService : AccessibilityService() {
                 }
             }
 
-            // 7. Social engagement words
+            // 10. Specific Reel engagement actions (require actual Like/Comment/Remix, not generic "Send" or "Audio" from DMs)
             if (lowerDesc.contains("like") || lowerText == "like" ||
                 lowerDesc.contains("comment") || lowerText == "comment" ||
-                lowerDesc.contains("share") || lowerDesc.contains("send") ||
-                lowerDesc.contains("remix") || lowerDesc.contains("audio") ||
-                lowerDesc.contains("sound")
+                lowerDesc.contains("remix")
             ) {
-                engagementWordMatches++
+                hasLikeAndComment++
             }
 
             val count = node.childCount
@@ -544,18 +594,23 @@ class ReelAccessibilityService : AccessibilityService() {
             }
         }
 
-        val hasRightRailActionStack = rightRailActionYPositions.size >= 3
-        val hasGeometryAndActions = (hasFullScreenVerticalContainer && (hasRightRailActionStack || engagementWordMatches >= 3)) ||
-                (hasRightRailActionStack && engagementWordMatches >= 2)
+        // HARD EXCLUSION: If any Inbox, Direct Message, Chat, Story, or Editable Message bar is on screen,
+        // it is NEVER a Reel screen (unless an explicit `clips_viewer` / `shorts_player` ID is active without an EditText).
+        val isBlockedByInboxOrStory = hasEditableMessageField || hasSelectedNonReelTab ||
+                (hasInboxOrChatOrStorySignal && !hasReelViewId)
 
-        val isReelScreen = when {
-            isDedicatedShortApp -> !hasSelectedNonReelTab
-            else -> !hasSelectedNonReelTab && (
-                hasReelViewId ||
+        val hasRightRailActionStack = rightRailActionYPositions.size >= 3
+        val hasReelStructure = hasReelViewId ||
                 hasSelectedReelTab ||
                 hasReelOverlayPhrase ||
-                hasGeometryAndActions
-            )
+                (hasFullScreenVerticalContainer && hasRightRailActionStack && hasLikeAndComment >= 2)
+
+        val isReelScreen = if (isBlockedByInboxOrStory) {
+            false
+        } else if (isDedicatedShortApp) {
+            hasRightRailActionStack || hasReelOverlayPhrase || hasReelViewId
+        } else {
+            hasReelStructure
         }
 
         val fpBuilder = mutableListOf<String>()
@@ -567,7 +622,7 @@ class ReelAccessibilityService : AccessibilityService() {
 
         return WindowReelAnalysis(
             isReelScreen = isReelScreen,
-            isDefinitelyNonReelScreen = hasSelectedNonReelTab,
+            isDefinitelyNonReelScreen = isBlockedByInboxOrStory,
             reelFingerprint = fingerprint
         )
     }
