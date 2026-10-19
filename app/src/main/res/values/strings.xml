@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ReelGuard</string>
+    <string name="accessibility_service_description">Detects when you swipe through Reels or Shorts on Instagram, Facebook, YouTube, TikTok, and other apps to update your live top-of-screen reel counter and daily/weekly/monthly dashboard. ReelGuard never reads private messages or personal text.</string>
+</resources>

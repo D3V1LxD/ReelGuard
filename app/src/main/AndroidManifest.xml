@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.reelguard.tracker">
+
+    <!-- Required to show the floating reel counter at the top of the phone display -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Required to keep the top display overlay alive -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Required to fetch real-time native app icons for social video apps -->
+    <queries>
+        <package android:name="com.instagram.android" />
+        <package android:name="com.zhiliaoapp.musically" />
+        <package android:name="com.ss.android.ugc.trill" />
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.facebook.katana" />
+        <package android:name="com.snapchat.android" />
+        <package android:name="com.twitter.android" />
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/ic_launcher_green"
+        android:roundIcon="@drawable/ic_launcher_green"
+        android:label="ReelGuard"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Material3.Dark.NoActionBar">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Dynamic Real-Time App Icon Aliases (Amber Warning & Red Brain-Rot States) -->
+        <activity-alias
+            android:name=".ui.MainActivityAmberAlias"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@drawable/ic_launcher_amber"
+            android:roundIcon="@drawable/ic_launcher_amber"
+            android:label="ReelGuard"
+            android:targetActivity=".ui.MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.MainActivityRedAlias"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@drawable/ic_launcher_red"
+            android:roundIcon="@drawable/ic_launcher_red"
+            android:label="ReelGuard"
+            android:targetActivity=".ui.MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Top-of-Screen Floating Counter & Brain Rot Animation Overlay -->
+        <service
+            android:name=".service.OverlayService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Displays real-time short-form video counter, active app icon, and brain health indicator at top of screen" />
+        </service>
+
+        <!-- Accessibility Service that detects Reels & Shorts across all apps -->
+        <service
+            android:name=".service.ReelAccessibilityService"
+            android:exported="true"
+            android:label="ReelGuard Reel &amp; Shorts Detector"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+    </application>
+</manifest>
